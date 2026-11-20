@@ -1,0 +1,31 @@
+# Gradle
+.gradle/
+build/
+app/build/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# Local machine config
+local.properties
+
+# Signing (never commit secrets)
+keystore.properties
+*.keystore
+*.jks
+
+# Release artifacts (published to GitHub Releases instead)
+*.apk
+*.aab
+.release-notes-*.md
+
+# Misc
+captures/
+.externalNativeBuild/
+.cxx/
+*.log
+.DS_Store

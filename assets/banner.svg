@@ -1,0 +1,32 @@
+<svg width="1200" height="300" viewBox="0 0 1200 300" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#060708"/>
+      <stop offset="1" stop-color="#0B0F0D"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#00E97A" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#00E97A" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="300" rx="18" fill="url(#bg)"/>
+  <rect x="1" y="1" width="1198" height="298" rx="17" fill="none" stroke="#1AF2F6F4" stroke-width="1.5"/>
+
+  <!-- radar -->
+  <circle cx="240" cy="150" r="95" fill="none" stroke="#1AF2F6F4" stroke-width="1.5"/>
+  <circle cx="240" cy="150" r="65" fill="none" stroke="#1AF2F6F4" stroke-opacity="0.6" stroke-width="1.5"/>
+  <circle cx="240" cy="150" r="35" fill="none" stroke="#1AF2F6F4" stroke-opacity="0.4" stroke-width="1.5"/>
+  <circle cx="240" cy="150" r="150" fill="url(#glow)"/>
+  <path d="M240,88 L286,196 L240,172 L194,196 Z" fill="#00E97A"/>
+  <circle cx="240" cy="150" r="6" fill="#00E97A"/>
+
+  <!-- wordmark -->
+  <text x="420" y="168" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="88" font-weight="700" fill="#F2F6F4" letter-spacing="-2">FindBeam</text>
+  <text x="424" y="222" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="26" font-weight="400" fill="#8E969D">Find lost Bluetooth things · Find the best Wi-Fi spot</text>
+
+  <!-- accents -->
+  <circle cx="1060" cy="70" r="5" fill="#00E97A"/>
+  <circle cx="1105" cy="110" r="3.5" fill="#FF3B47"/>
+  <circle cx="1040" cy="235" r="3.5" fill="#F2F6F4"/>
+</svg>
