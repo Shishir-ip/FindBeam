@@ -199,7 +199,7 @@ private fun DirectionScanPhase(track: TrackState, viewModel: FinderViewModel) {
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            "Turn around slowly — a full circle — while FindBeam measures the signal from every direction.",
+            "Turn around slowly — a full circle takes about 15 seconds — while FindBeam measures the signal from every direction.",
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
             color = app.textDim
@@ -259,7 +259,7 @@ private fun DirectionScanPhase(track: TrackState, viewModel: FinderViewModel) {
 
         Button(
             onClick = { viewModel.beginGuiding() },
-            enabled = track.readyToGuide,
+            enabled = track.readyToGuide || track.canStartAnyway,
             shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(
                 containerColor = app.neon,
@@ -270,8 +270,21 @@ private fun DirectionScanPhase(track: TrackState, viewModel: FinderViewModel) {
                 .height(56.dp)
         ) {
             Text(
-                if (track.readyToGuide) "Start guiding" else "Keep turning…",
+                when {
+                    track.readyToGuide -> "Start guiding"
+                    track.canStartAnyway -> "Start anyway (less accurate)"
+                    else -> "Keep turning…"
+                },
                 style = MaterialTheme.typography.labelLarge
+            )
+        }
+        if (!track.readyToGuide && track.canStartAnyway) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "For the best accuracy, finish the circle — auto-start happens when it's complete.",
+                style = MaterialTheme.typography.labelSmall,
+                color = app.textFaint,
+                textAlign = TextAlign.Center
             )
         }
         Spacer(Modifier.height(12.dp))
@@ -322,6 +335,22 @@ private fun GuidingPhase(track: TrackState, rotationDeg: Float, viewModel: Finde
     ) {
         if (track.needsCalibration) {
             CompassCalibrationBanner()
+            Spacer(Modifier.height(14.dp))
+        }
+        if (track.signalLost) {
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = app.amber.copy(alpha = 0.12f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, app.amber.copy(alpha = 0.4f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    "Signal weak or lost — walk slowly toward the arrow and stay near the object's last direction.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = app.amber,
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
             Spacer(Modifier.height(14.dp))
         }
         if (!com.findbeam.app.core.sensors.CompassEngine.isFlatEnough(track.pitchDeg)) {

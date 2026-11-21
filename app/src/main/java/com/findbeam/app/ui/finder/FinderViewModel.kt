@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlin.math.floor
+import kotlin.math.abs
 
 enum class TrackPhase { DIRECTION_SCAN, GUIDING, ARRIVED }
 
@@ -57,6 +58,7 @@ data class TrackState(
     val spinCoverage: Float = 0f,
     val spinSamples: Int = 0,
     val readyToGuide: Boolean = false,
+    val canStartAnyway: Boolean = false,
     val scanConfidence: Float = 0f,
     // Shared
     val heading: Float = 0f,
@@ -73,6 +75,7 @@ data class TrackState(
     val compassAccuracy: Int = SensorManager.SENSOR_STATUS_ACCURACY_HIGH,
     val pitchDeg: Float = 0f,
     val needsCalibration: Boolean = false,
+    val signalLost: Boolean = false,
     val trackingMs: Long = 0
 )
 
@@ -83,7 +86,13 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
     private val compass = CompassEngine(app)
     private val stepCounter = StepCounter(app)
     private val proximity = ProximityTracker()
-    private val estimator = DirectionEstimator()
+
+    // Anchor estimator: accumulates the WHOLE spin scan (no time window), so
+    // slow turns keep their early samples. Sliding-window estimator handles
+    // live re-checks while walking.
+    private val anchorEstimator = DirectionEstimator(windowMs = Long.MAX_VALUE, maxSamples = 240)
+    private val liveEstimator = DirectionEstimator(windowMs = 15_000L, maxSamples = 60)
+
     private val beeps = BeepPlayer()
     private val scanRssiFilter = SignalFilter(alpha = 0.3f)
     private val settings get() = Locator.settingsStore
@@ -97,7 +106,8 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
         var category: DeviceCategory,
         var lastSeen: Long,
         var companyId: Int?,
-        var uuids: List<String>
+        var uuids: List<String>,
+        var classMajor: Int?
     )
 
     private val devices = LinkedHashMap<String, DeviceMutable>()
@@ -110,8 +120,8 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var compassAccuracy = SensorManager.SENSOR_STATUS_ACCURACY_HIGH
 
     private var trackingStartedAt = 0L
+    private var lastTrackingSampleAt = 0L
     private val visitedBins = BooleanArray(12)
-    private var scanEstimate: DirectionEstimator.Estimate? = null
     private var autoAdvanceJob: Job? = null
     private var trackLoop: Job? = null
     private var lastScanPublish = 0L
@@ -121,6 +131,10 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _trackUi = MutableStateFlow(TrackState())
     val trackUi: StateFlow<TrackState> = _trackUi
+
+    init {
+        scanner.preloadBondedNames()
+    }
 
     // ---------------------------------------------------------------- scan
 
@@ -179,35 +193,49 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
             alias = alias,
             filter = SignalFilter(alpha = 0.35f),
             history = mutableListOf(),
-            category = DeviceCategories.categorize(d.name, d.companyId, d.serviceUuids),
+            category = DeviceCategories.categorize(d.name, d.companyId, d.serviceUuids, d.classMajor),
             lastSeen = now,
             companyId = d.companyId,
-            uuids = d.serviceUuids
+            uuids = d.serviceUuids,
+            classMajor = d.classMajor
         ).also {
             devices[d.address] = it
         }
 
-        rec.rawName = d.name ?: rec.rawName
+        if (d.name != null) rec.rawName = d.name
         rec.alias = alias
-        if (rec.category == DeviceCategory.OTHER) {
-            rec.category = DeviceCategories.categorize(rec.rawName, d.companyId, d.serviceUuids)
-        }
         rec.lastSeen = now
         rec.companyId = d.companyId
         rec.uuids = d.serviceUuids
+        if (d.classMajor != null) rec.classMajor = d.classMajor
+        if (rec.category == DeviceCategory.OTHER || rec.classMajor == null) {
+            val next = DeviceCategories.categorize(rec.rawName, d.companyId, d.serviceUuids, rec.classMajor)
+            if (next != DeviceCategory.OTHER || rec.rawName == null) rec.category = next
+        }
 
-        val smoothed = rec.filter.update(d.rssi)
+        rec.filter.update(d.rssi)
         rec.history.add(d.rssi)
         while (rec.history.size > 40) rec.history.removeAt(0)
+
+        // Names are often missing from advertisement packets; resolve from
+        // Android's device cache in the background and refresh the list.
+        if (rec.rawName == null || rec.classMajor == null) {
+            scanner.resolveRemoteInfoAsync(d.address) { info ->
+                val r = devices[d.address] ?: return@resolveRemoteInfoAsync
+                if (info.name != null && r.rawName == null) r.rawName = info.name
+                if (info.classMajor != null) r.classMajor = info.classMajor
+                r.category = DeviceCategories.categorize(
+                    r.rawName, r.companyId, r.uuids, r.classMajor
+                )
+                publishScanUi(force = true)
+            }
+        }
 
         if (selectedAddress == d.address) {
             handleTrackingSample(d.rssi, now)
         } else {
             publishScanUi()
         }
-        // keep reference used so lint is happy about the var
-        @Suppress("UNUSED_EXPRESSION")
-        smoothed
     }
 
     private fun publishScanUi(force: Boolean = false) {
@@ -216,7 +244,8 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
         lastScanPublish = now
 
         val list = devices.values
-            .filter { now - it.lastSeen < 15_000 && it.rssiRawVisible() }
+            .filter { now - it.lastSeen < 20_000 }
+            .filter { (it.history.lastOrNull() ?: -100) > -99 }
             .sortedByDescending { it.filter.current() }
             .map {
                 DeviceUi(
@@ -237,9 +266,6 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    private fun DeviceMutable.rssiRawVisible(): Boolean =
-        (history.lastOrNull() ?: -100) > -99
-
     // ------------------------------------------------------------ tracking
 
     fun selectDevice(address: String, name: String) {
@@ -249,10 +275,11 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
 
         stopScan()
         proximity.reset()
-        estimator.clear()
+        anchorEstimator.clear()
+        liveEstimator.clear()
         java.util.Arrays.fill(visitedBins, false)
-        scanEstimate = null
         trackingStartedAt = System.currentTimeMillis()
+        lastTrackingSampleAt = 0L
 
         scanner.lowLatency = true
         scanner.start(::onBleResult, filterAddress = address)
@@ -292,25 +319,26 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
     fun beginGuiding() {
         if (_trackUi.value.phase != TrackPhase.DIRECTION_SCAN) return
         autoAdvanceJob?.cancel()
-        scanEstimate = estimator.estimate(System.currentTimeMillis())
         _trackUi.value = _trackUi.value.copy(
             phase = TrackPhase.GUIDING,
-            scanConfidence = scanEstimate?.confidence ?: 0f
+            scanConfidence = anchorEstimator.estimate(System.currentTimeMillis())?.confidence ?: 0f
         )
     }
 
     fun redoDirectionScan() {
         if (_trackUi.value.phase == TrackPhase.ARRIVED) return
         autoAdvanceJob?.cancel()
-        estimator.clear()
+        anchorEstimator.clear()
+        liveEstimator.clear()
         java.util.Arrays.fill(visitedBins, false)
-        scanEstimate = null
         proximity.reset()
+        lastTrackingSampleAt = 0L
         _trackUi.value = _trackUi.value.copy(
             phase = TrackPhase.DIRECTION_SCAN,
             spinCoverage = 0f,
             spinSamples = 0,
             readyToGuide = false,
+            canStartAnyway = false,
             scanConfidence = 0f
         )
     }
@@ -328,28 +356,34 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun handleTrackingSample(rssi: Int, nowMs: Long) {
+        lastTrackingSampleAt = nowMs
         val state = _trackUi.value
         when (state.phase) {
             TrackPhase.DIRECTION_SCAN -> {
-                estimator.addSample(currentHeading, rssi, nowMs)
+                anchorEstimator.addSample(currentHeading, rssi, nowMs)
                 val bin = floor(SignalMath.normalizeDeg(currentHeading) / 30f)
                     .toInt().coerceIn(0, 11)
                 visitedBins[bin] = true
                 val coverage = visitedBins.count { it } / 12f
-                val est = estimator.estimate(nowMs)
-                scanEstimate = est
-                val ready = coverage >= 0.7f && (est?.sampleCount ?: 0) >= 14
+                val totalSamples = anchorEstimator.totalSamples()
+                val est = anchorEstimator.estimate(nowMs)
+
+                // Readiness depends on circle coverage AND having enough
+                // total readings — NOT on the noisy strongest-cluster size.
+                val ready = coverage >= 0.66f && totalSamples >= 10
                 _trackUi.value = state.copy(
                     spinCoverage = coverage,
-                    spinSamples = estimator.sampleCount(),
+                    spinSamples = totalSamples,
                     scanConfidence = est?.confidence ?: 0f,
                     readyToGuide = ready,
+                    canStartAnyway = totalSamples >= 6,
                     liveRssi = scanRssiFilter.update(rssi)
                 )
                 if (ready) scheduleAutoAdvance()
             }
             TrackPhase.GUIDING -> {
-                estimator.addSample(currentHeading, rssi, nowMs)
+                anchorEstimator.addSample(currentHeading, rssi, nowMs)
+                liveEstimator.addSample(currentHeading, rssi, nowMs)
                 val prox = proximity.update(rssi, nowMs)
                 if (settings.settings.value.sound && !prox.arrived) {
                     beeps.rateHz = 0.6f + 11.5f * prox.progress
@@ -367,7 +401,7 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
     private fun scheduleAutoAdvance() {
         if (autoAdvanceJob?.isActive == true) return
         autoAdvanceJob = viewModelScope.launch {
-            delay(900)
+            delay(700)
             if (_trackUi.value.phase == TrackPhase.DIRECTION_SCAN && _trackUi.value.readyToGuide) {
                 beginGuiding()
             }
@@ -395,10 +429,12 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
             TrackPhase.GUIDING -> {
-                val live = estimator.estimate(now)
-                val target = blendTargets(scanEstimate, live)
+                val live = liveEstimator.estimate(now)
+                val anchor = anchorEstimator.estimate(now)
+                val target = blendTargets(anchor, live)
                 val arrow = SignalMath.angleDiff(target, currentHeading)
-                val prox = proximity.lastState() ?: return
+                val prox = proximity.lastState()
+                val lost = lastTrackingSampleAt == 0L || now - lastTrackingSampleAt > 7_000
                 _trackUi.value = s.copy(
                     heading = currentHeading,
                     pitchDeg = currentPitch,
@@ -406,12 +442,13 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
                     needsCalibration = compassAccuracy < SensorManager.SENSOR_STATUS_ACCURACY_LOW,
                     targetDeg = target,
                     arrowAngle = arrow,
-                    aligned = kotlin.math.abs(arrow) < 30f,
-                    confidence = maxOf(live?.confidence ?: 0f, scanEstimate?.confidence ?: 0f),
-                    progress = prox.progress,
-                    trend = prox.trend,
-                    distanceMeters = prox.distanceMeters,
-                    liveRssi = prox.smoothed,
+                    aligned = abs(arrow) < 30f,
+                    confidence = maxOf(live?.confidence ?: 0f, anchor?.confidence ?: 0f),
+                    progress = prox?.progress ?: s.progress,
+                    trend = prox?.trend ?: s.trend,
+                    distanceMeters = prox?.distanceMeters ?: s.distanceMeters,
+                    liveRssi = prox?.smoothed ?: s.liveRssi,
+                    signalLost = lost && s.trackingMs > 4_000,
                     trackingMs = now - trackingStartedAt
                 )
             }
@@ -419,15 +456,19 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * The anchor (whole spin scan) is the stable direction estimate; the live
+     * sliding-window estimate gently corrects it while the user walks.
+     */
     private fun blendTargets(
-        scan: DirectionEstimator.Estimate?,
+        anchor: DirectionEstimator.Estimate?,
         live: DirectionEstimator.Estimate?
     ): Float {
-        if (scan == null && live == null) return currentHeading
-        if (scan == null) return live!!.directionDeg
-        if (live == null || live.confidence < 0.35f) return scan.directionDeg
-        val w = (live.confidence * 0.6f).coerceAtMost(0.45f)
-        return SignalMath.circularLerp(scan.directionDeg, live.directionDeg, w)
+        if (anchor == null && live == null) return currentHeading
+        if (anchor == null) return live!!.directionDeg
+        if (live == null || live.confidence < 0.40f) return anchor.directionDeg
+        val w = (live.confidence * 0.6f).coerceAtMost(0.5f)
+        return SignalMath.circularLerp(anchor.directionDeg, live.directionDeg, w)
     }
 
     override fun onCleared() {

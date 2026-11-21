@@ -9,12 +9,17 @@ import kotlin.math.sqrt
  * (heading, rssi) pairs while the user turns around, then doing weighted
  * circular statistics on the strongest cluster of readings.
  *
- * The estimator keeps a sliding time window, so during guidance it continuously
- * re-checks the direction as the user walks.
+ * Two instances are used by the view model:
+ *  - an "anchor" estimator that accumulates the entire spin scan (no time
+ *    window) so slow turns never lose their early samples;
+ *  - a sliding-window estimator for live re-checks while walking.
+ *
+ * If the strongest-cluster has too few readings (noisy RSSI), the estimate
+ * falls back to the weighted mean of all samples instead of failing.
  */
 class DirectionEstimator(
-    private val windowMs: Long = 12_000L,
-    private val maxSamples: Int = 90
+    private val windowMs: Long,
+    private val maxSamples: Int = 120
 ) {
 
     data class Sample(val headingDeg: Float, val rssi: Int, val t: Long)
@@ -22,7 +27,7 @@ class DirectionEstimator(
     data class Estimate(
         val directionDeg: Float,   // absolute compass direction of the target
         val confidence: Float,     // 0..1
-        val sampleCount: Int,
+        val clusterCount: Int,
         val bestRssi: Int
     )
 
@@ -36,7 +41,8 @@ class DirectionEstimator(
     }
 
     @Synchronized
-    fun prune(nowMs: Long) {
+    private fun prune(nowMs: Long) {
+        if (windowMs == Long.MAX_VALUE) return
         while (samples.isNotEmpty() && nowMs - samples.first().t > windowMs) {
             samples.removeFirst()
         }
@@ -45,15 +51,16 @@ class DirectionEstimator(
     @Synchronized
     fun estimate(nowMs: Long): Estimate? {
         prune(nowMs)
-        if (samples.size < 8) return null
+        if (samples.size < 5) return null
 
         val list = samples.toList()
         val best = list.maxOf { it.rssi }
 
-        // Cluster: readings within 4 dB of the strongest one.
-        val cluster = list.filter { it.rssi >= best - 4 }
+        // Cluster: readings within 4 dB of the strongest one. On noisy
+        // channels this can be tiny, so fall back to everything.
+        var cluster = list.filter { it.rssi >= best - 4 }
+        if (cluster.size < 3) cluster = list
 
-        // Weight = closeness to the best reading, squared for emphasis.
         val weights = cluster.map { s ->
             val closeness = (s.rssi - (best - 12)).toFloat().coerceAtLeast(0.5f) / 12f
             closeness * closeness
@@ -61,7 +68,7 @@ class DirectionEstimator(
         val angles = cluster.map { it.headingDeg }
         val direction = SignalMath.circularMean(angles, weights)
 
-        // Confidence: how tight and well-populated the strongest cluster is.
+        // Confidence: how tight and well-populated the reading set is.
         var vecX = 0.0
         var vecY = 0.0
         for (i in angles.indices) {
@@ -71,7 +78,7 @@ class DirectionEstimator(
         }
         val wSum = weights.sum().coerceAtLeast(1e-6f)
         val r = sqrt(vecX * vecX + vecY * vecY) / wSum.toDouble()
-        val sizeFactor = (cluster.size / 14f).coerceIn(0f, 1f)
+        val sizeFactor = (samples.size / 12f).coerceIn(0f, 1f)
         val confidence = ((r * 0.55 + 0.45) * sizeFactor).toFloat().coerceIn(0f, 1f)
 
         return Estimate(direction, confidence, cluster.size, best)
@@ -81,5 +88,5 @@ class DirectionEstimator(
     fun clear() = samples.clear()
 
     @Synchronized
-    fun sampleCount(): Int = samples.size
+    fun totalSamples(): Int = samples.size
 }

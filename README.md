@@ -35,19 +35,28 @@ FindBeam helps you answer two everyday questions:
 
 ### 🎯 Object Finder
 - Live BLE scanning with signal-strength meters, history sparklines and
-  device-type detection (audio, wearables, trackers, …)
-- **Direction scan** — hold the phone flat, turn a full circle; FindBeam works
-  out which direction the signal is strongest using weighted circular statistics
+  device-type detection — names are resolved from Android's device cache and
+  `BluetoothClass`, so real names appear even when ads omit them
+- **Direction scan** — hold the phone flat, turn a full circle; FindBeam keeps
+  the entire spin in an anchor estimator (no time window) and finds the
+  strongest direction with weighted circular statistics on the strongest
+  cluster, falling back to the weighted mean of all samples on noisy channels
 - **Guidance mode** — a big glow arrow that always points at the object as you
-  turn and walk, with continuous re-checking while you move
+  turn and walk, with a 15 s sliding-window estimator continuously re-checking
+  the direction while you move
 - Smoothed signal math so the arrow and meter don't jump around
-- **"Getting warmer / colder"** feedback, approximate distance and step counter
+- **"Getting warmer / colder"** feedback, approximate distance (median-filtered)
+  and step counter
 - **Very-close mode** — beeps and vibration accelerate as you approach, and the
   app declares *"You're right next to it"* when the signal peaks and stops improving
+- Signal-lost banner if the object stops advertising while guiding
 - Rename unknown devices to keep them friendly, filter by category and search
 
 ### 📶 Wi-Fi Best Spot
-- Big animated meter for the connected network with a rising Geiger-style tone
+- Big animated meter with **live RSSI from the modern ConnectivityManager
+  NetworkCallback** (Android 10+), legacy polling as fallback — no more stale
+  readings from the deprecated `WifiManager.connectionInfo`
+- Geiger-style tone that rises in pitch as the signal improves
 - **Best spot so far** tracking with a pulse when you break your record
 - **Save this spot** (press & hold) — records signal strength plus a quick
   latency and download test, then names the place ("Bedroom corner")

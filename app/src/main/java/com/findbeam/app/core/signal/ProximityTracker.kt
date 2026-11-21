@@ -22,6 +22,7 @@ class ProximityTracker {
 
     private val ema = SignalFilter(alpha = 0.30f)
     private val history = ArrayDeque<Pair<Long, Float>>()
+    private val recentRaw = ArrayDeque<Int>()
 
     private var best = Float.NEGATIVE_INFINITY
     private var bestAt = 0L
@@ -36,6 +37,7 @@ class ProximityTracker {
     fun reset() {
         ema.reset()
         history.clear()
+        recentRaw.clear()
         best = Float.NEGATIVE_INFINITY
         bestAt = 0L
         firstAt = 0L
@@ -51,6 +53,8 @@ class ProximityTracker {
 
         history.addLast(nowMs to s)
         while (history.size > 40) history.removeFirst()
+        recentRaw.addLast(rssi)
+        while (recentRaw.size > 5) recentRaw.removeFirst()
 
         // Value ~2.5 s ago (or the oldest we have) for the trend delta.
         val past = history.firstOrNull { nowMs - it.first <= 2500 } ?: history.first()
@@ -66,10 +70,10 @@ class ProximityTracker {
         val sinceBest = nowMs - bestAt
         val sinceFirst = nowMs - firstAt
         if (!arrived &&
-            sinceFirst > 12_000 &&
-            sinceBest > 5_500 &&
+            sinceFirst > 10_000 &&
+            sinceBest > 5_000 &&
             s >= best - 3.5f &&
-            s >= -62f
+            (s >= -62f || (sinceBest > 8_000 && s >= -75f))
         ) {
             arrived = true
         }
@@ -80,6 +84,9 @@ class ProximityTracker {
             else -> Trend.STEADY
         }
 
+        // Median of recent raw readings -> distance robust to spikes.
+        val medianRaw = recentRaw.sorted()[recentRaw.size / 2]
+
         val state = State(
             smoothed = s,
             delta = lastDelta,
@@ -88,7 +95,7 @@ class ProximityTracker {
             newBest = newBest && !arrived,
             arrived = arrived,
             progress = SignalMath.strength01(s),
-            distanceMeters = SignalMath.distanceMeters(rssi)
+            distanceMeters = SignalMath.distanceMeters(medianRaw)
         )
         last = state
         return state

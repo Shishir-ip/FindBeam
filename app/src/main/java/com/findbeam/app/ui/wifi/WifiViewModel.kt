@@ -57,6 +57,8 @@ class WifiViewModel(app: Application) : AndroidViewModel(app) {
 
     fun start() {
         stopPolling()
+        tracker.start()
+        refreshNetworks()
         pollJob = viewModelScope.launch {
             while (isActive) {
                 val state = tracker.current()
@@ -89,13 +91,14 @@ class WifiViewModel(app: Application) : AndroidViewModel(app) {
                     wifiEnabled = tracker.isWifiEnabled,
                     soundOn = settings.settings.value.sound
                 )
-                delay(450)
+                delay(300)
             }
         }
     }
 
     fun stop() {
         stopPolling()
+        tracker.stop()
     }
 
     private fun stopPolling() {

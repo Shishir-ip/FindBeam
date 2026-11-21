@@ -9,6 +9,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -188,6 +190,7 @@ fun DeviceScanScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -213,6 +216,12 @@ fun DeviceScanScreen(
                 selected = filter == DeviceCategory.TRACKER,
                 onClick = { filter = DeviceCategory.TRACKER },
                 label = { Text("Trackers") },
+                colors = chipColors(app)
+            )
+            FilterChip(
+                selected = filter == DeviceCategory.PHONE,
+                onClick = { filter = DeviceCategory.PHONE },
+                label = { Text("Phones") },
                 colors = chipColors(app)
             )
             FilterChip(

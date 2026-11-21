@@ -50,9 +50,11 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -61,6 +63,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.findbeam.app.core.haptics.Haptics
 import com.findbeam.app.core.signal.SignalMath
 import com.findbeam.app.core.store.Locator
 import com.findbeam.app.core.wifi.WifiTracker
@@ -69,6 +72,7 @@ import com.findbeam.app.ui.components.SectionLabel
 import com.findbeam.app.ui.theme.Amber
 import com.findbeam.app.ui.theme.LocalAppColors
 import com.findbeam.app.util.Format
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
 
 @Composable
@@ -388,12 +392,24 @@ private fun HoldToSaveButton(
     val app = LocalAppColors.current
     val context = LocalContext.current
     var holding by remember { mutableStateOf(false) }
-    val animatedHold by animateFloatAsState(
-        if (holding) 1f else 0f,
-        spring(dampingRatio = 0.9f, stiffness = 60f),
-        label = "hold"
-    )
-    val shownProgress = if (saving) progress else animatedHold
+    var holdProgress by remember { mutableFloatStateOf(0f) }
+
+    // Frame-driven hold progress so the ring tracks the finger exactly.
+    LaunchedEffect(holding) {
+        if (holding) {
+            val start = withFrameNanos { it }
+            while (isActive) {
+                val now = withFrameNanos { it }
+                val p = ((now - start) / 2_500_000_000f).coerceIn(0f, 1f)
+                holdProgress = p
+                if (p >= 1f) break
+            }
+        } else {
+            holdProgress = 0f
+        }
+    }
+
+    val shownProgress = if (saving) progress else holdProgress
 
     Box(contentAlignment = Alignment.Center) {
         // progress ring behind label
@@ -412,15 +428,21 @@ private fun HoldToSaveButton(
             modifier = Modifier
                 .size(178.dp)
                 .pointerInput(enabled) {
-                    if (!enabled) return@pointerInput
                     detectTapGestures(onPress = {
+                        if (!enabled) return@detectTapGestures
                         holding = true
-                        val completed = withTimeoutOrNull(2600) {
-                            tryAwaitRelease()
-                            false
-                        } == null
+                        // Wait for release; timeout while still held = save.
+                        val releasedInTime = withTimeoutOrNull(2_500) {
+                            try {
+                                awaitRelease()
+                                true
+                            } catch (_: Exception) {
+                                true
+                            }
+                        }
                         holding = false
-                        if (completed) {
+                        if (releasedInTime == null) {
+                            Haptics.tick(context, 200)
                             onComplete()
                         }
                     })
