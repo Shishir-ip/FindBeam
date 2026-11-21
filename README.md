@@ -35,8 +35,9 @@ FindBeam helps you answer two everyday questions:
 
 ### 🎯 Object Finder
 - Live BLE scanning with signal-strength meters, history sparklines and
-  device-type detection — names are resolved from Android's device cache and
-  `BluetoothClass`, so real names appear even when ads omit them
+  device-type detection — names come from classic Bluetooth discovery rounds
+  (the same mechanism the system settings uses), the Android device cache and
+  a GATT Device-Name read, so real names appear even when ads omit them
 - **Direction scan** — hold the phone flat, turn a full circle; FindBeam keeps
   the entire spin in an anchor estimator (no time window) and finds the
   strongest direction with weighted circular statistics on the strongest

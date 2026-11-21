@@ -124,6 +124,7 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
     private val visitedBins = BooleanArray(12)
     private var autoAdvanceJob: Job? = null
     private var trackLoop: Job? = null
+    private var discoveryJob: Job? = null
     private var lastScanPublish = 0L
 
     private val _scanUi = MutableStateFlow(ScanUiState())
@@ -159,11 +160,55 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
         scanner.lowLatency = false
         val ok = scanner.start(::onBleResult)
         _scanUi.value = _scanUi.value.copy(scanning = ok)
+        if (ok) startDiscoveryLoop()
     }
 
     fun stopScan() {
+        stopDiscoveryLoop()
         scanner.stop()
         _scanUi.value = _scanUi.value.copy(scanning = false)
+    }
+
+    /**
+     * Runs classic discovery in rounds while the scan screen is open. This
+     * is the same mechanism the system Bluetooth settings uses to show
+     * names for nearby (unbonded) devices: the stack fetches remote names
+     * during discovery and caches them.
+     */
+    private fun startDiscoveryLoop() {
+        if (discoveryJob?.isActive == true) return
+        discoveryJob = viewModelScope.launch {
+            while (_scanUi.value.scanning) {
+                val started = scanner.startClassicDiscovery(::onRemoteInfoResolved)
+                if (!started) break
+                delay(30_000) // a discovery pass runs ~12–25 s
+            }
+        }
+    }
+
+    private fun stopDiscoveryLoop() {
+        discoveryJob?.cancel()
+        discoveryJob = null
+        scanner.stopDiscovery()
+    }
+
+    private fun onRemoteInfoResolved(address: String, info: BleScanner.RemoteInfo) {
+        val rec = devices[address] ?: return
+        var changed = false
+        if (info.name != null && rec.rawName == null) {
+            rec.rawName = info.name
+            changed = true
+        }
+        if (info.classMajor != null) {
+            rec.classMajor = info.classMajor
+            changed = true
+        }
+        if (changed) {
+            rec.category = DeviceCategories.categorize(
+                rec.rawName, rec.companyId, rec.uuids, rec.classMajor
+            )
+            publishScanUi(force = true)
+        }
     }
 
     fun refreshDevices() {
@@ -275,6 +320,28 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
 
         stopScan()
         proximity.reset()
+
+        // Last-resort name fetch for the device being tracked: a short GATT
+        // read of the standard Device Name characteristic (works for LE-only
+        // devices that never show up in classic discovery).
+        if (rec?.rawName == null) {
+            scanner.fetchNameViaGatt(address) { name ->
+                val clean = name?.trim()?.takeIf { it.isNotEmpty() } ?: return@fetchNameViaGatt
+                devices[address]?.let { r ->
+                    if (r.rawName == null) {
+                        r.rawName = clean
+                        r.category = DeviceCategories.categorize(
+                            r.rawName, r.companyId, r.uuids, r.classMajor
+                        )
+                    }
+                }
+                publishScanUi(force = true)
+                if (selectedAddress == address && devices[address]?.rawName != null) {
+                    selectedName = devices[address]!!.rawName!!
+                    _trackUi.value = _trackUi.value.copy(deviceName = selectedName)
+                }
+            }
+        }
         anchorEstimator.clear()
         liveEstimator.clear()
         java.util.Arrays.fill(visitedBins, false)
@@ -348,6 +415,7 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
         autoAdvanceJob?.cancel()
         trackLoop?.cancel()
         trackLoop = null
+        stopDiscoveryLoop()
         scanner.stop()
         compass.stop()
         stepCounter.stop()

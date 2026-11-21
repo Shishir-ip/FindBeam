@@ -14,8 +14,8 @@ android {
         applicationId = "com.findbeam.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.2.0"
         vectorDrawables { useSupportLibrary = true }
         // Used by the in-app "Check for updates" feature (GitHub Releases API).
         buildConfigField("String", "UPDATE_REPO", "\"Shishir-ip/FindBeam\"")
