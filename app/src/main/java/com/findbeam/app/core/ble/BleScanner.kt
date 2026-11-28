@@ -68,7 +68,19 @@ class BleScanner(private val context: Context) {
 
     var lowLatency = false
 
+    /**
+     * When classic discovery is running, LE scanning is throttled to
+     * SCAN_MODE_LOW_POWER — running both at full duty cycle starves
+     * discovery on many OEM stacks (ColorOS included) and only a couple of
+     * names ever arrive.
+     */
+    @Volatile var throttleForDiscovery = false
+
     private var callback: ScanCallback? = null
+    private var leActive = false
+    private var activeOnDevice: ((Device) -> Unit)? = null
+    private var activeFilterAddress: String? = null
+    private var activeFilterName: String? = null
 
     // Remote-device info resolved so far, keyed by MAC address.
     private val remoteCache = ConcurrentHashMap<String, RemoteInfo>()
@@ -168,7 +180,10 @@ class BleScanner(private val context: Context) {
             false
         }
 
-    fun startClassicDiscovery(onResolved: (address: String, info: RemoteInfo) -> Unit): Boolean {
+    fun startClassicDiscovery(
+        onResolved: (address: String, info: RemoteInfo) -> Unit,
+        onFinished: () -> Unit = {}
+    ): Boolean {
         val adapter = bluetoothManager.adapter ?: return false
         if (!adapter.isEnabled || !hasPermission) return false
 
@@ -208,6 +223,9 @@ class BleScanner(private val context: Context) {
                                 RemoteInfo(old.name, cls)
                             }
                         }
+                    }
+                    BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
+                        mainHandler.post { onFinished() }
                     }
                 }
             }
@@ -362,21 +380,45 @@ class BleScanner(private val context: Context) {
         }
     }
 
-    fun start(onDevice: (Device) -> Unit, filterAddress: String? = null): Boolean {
+    fun start(
+        onDevice: (Device) -> Unit,
+        filterAddress: String? = null,
+        filterName: String? = null
+    ): Boolean {
         val adapter = bluetoothManager.adapter ?: return false
         if (!adapter.isEnabled) return false
         if (!hasPermission) return false
         stop()
 
+        activeOnDevice = onDevice
+        activeFilterAddress = filterAddress
+        activeFilterName = filterName?.trim()?.takeIf { it.isNotEmpty() && it != "Unknown device" }
+        leActive = true
+
+        return internalStart()
+    }
+
+    private fun internalStart(): Boolean {
+        val onDevice = activeOnDevice ?: return false
+        val adapter = bluetoothManager.adapter ?: return false
+        if (!adapter.isEnabled || !hasPermission) return false
+
         val settings = ScanSettings.Builder()
             .setScanMode(
-                if (lowLatency) ScanSettings.SCAN_MODE_LOW_LATENCY
-                else ScanSettings.SCAN_MODE_BALANCED
+                when {
+                    throttleForDiscovery -> ScanSettings.SCAN_MODE_LOW_POWER
+                    lowLatency -> ScanSettings.SCAN_MODE_LOW_LATENCY
+                    else -> ScanSettings.SCAN_MODE_BALANCED
+                }
             )
             .build()
 
-        val filters = filterAddress?.let { addr ->
-            listOf(ScanFilter.Builder().setDeviceAddress(addr).build())
+        val filters = mutableListOf<ScanFilter>()
+        activeFilterAddress?.let {
+            filters.add(ScanFilter.Builder().setDeviceAddress(it).build())
+        }
+        activeFilterName?.let {
+            filters.add(ScanFilter.Builder().setDeviceName(it).build())
         }
 
         val cb = object : ScanCallback() {
@@ -400,7 +442,7 @@ class BleScanner(private val context: Context) {
         } ?: return false
 
         return try {
-            if (filters != null) scanner.startScan(filters, settings, cb)
+            if (filters.isNotEmpty()) scanner.startScan(filters, settings, cb)
             else scanner.startScan(null, settings, cb)
             true
         } catch (_: SecurityException) {
@@ -410,7 +452,17 @@ class BleScanner(private val context: Context) {
         }
     }
 
+    /** Restarts the LE scan with current parameters (e.g. after a mode change). */
+    fun restart() {
+        if (!leActive) return
+        internalStart()
+    }
+
     fun stop() {
+        leActive = false
+        activeOnDevice = null
+        activeFilterAddress = null
+        activeFilterName = null
         val cb = callback ?: return
         callback = null
         try {

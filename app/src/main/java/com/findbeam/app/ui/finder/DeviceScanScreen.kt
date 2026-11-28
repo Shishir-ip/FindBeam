@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.BluetoothDisabled
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.DevicesOther
 import androidx.compose.material.icons.rounded.Edit
@@ -57,6 +58,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,11 +73,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.findbeam.app.core.ble.ConnectedDevicesProvider
+import com.findbeam.app.core.ble.DeviceCategories
 import com.findbeam.app.core.ble.DeviceCategory
 import com.findbeam.app.core.haptics.Haptics
 import com.findbeam.app.core.signal.SignalMath
 import com.findbeam.app.ui.components.EmptyState
 import com.findbeam.app.ui.components.LiveDot
+import com.findbeam.app.ui.components.SectionLabel
 import com.findbeam.app.ui.components.Sparkline
 import com.findbeam.app.ui.theme.LocalAppColors
 import com.findbeam.app.util.Format
@@ -89,8 +94,10 @@ fun DeviceScanScreen(
     val app = LocalAppColors.current
     val context = LocalContext.current
     val scan by viewModel.scanUi.collectAsStateWithLifecycle()
+    val connected by viewModel.connectedDevices.collectAsStateWithLifecycle()
     var query by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf<DeviceCategory?>(null) }
+    var hideUnknown by rememberSaveable { mutableStateOf(true) }
     var renameTarget by remember { mutableStateOf<DeviceUi?>(null) }
 
     LaunchedEffect(Unit) {
@@ -98,10 +105,13 @@ fun DeviceScanScreen(
         viewModel.startScan()
     }
 
-    val filtered = remember(scan.devices, query, filter) {
+    val connectedAddrs = remember(connected) { connected.map { it.address }.toSet() }
+    val nearby = remember(scan.devices, connectedAddrs, query, filter, hideUnknown) {
         scan.devices.filter { d ->
-            (filter == null || d.category == filter) &&
-                (query.isBlank() || d.displayName.contains(query, ignoreCase = true))
+            d.address !in connectedAddrs &&
+                (filter == null || d.category == filter) &&
+                (query.isBlank() || d.displayName.contains(query, ignoreCase = true)) &&
+                (!hideUnknown || !d.isUnknown)
         }
     }
 
@@ -230,17 +240,35 @@ fun DeviceScanScreen(
                 label = { Text("Other") },
                 colors = chipColors(app)
             )
+            FilterChip(
+                selected = hideUnknown,
+                onClick = { hideUnknown = !hideUnknown },
+                label = { Text("Named only") },
+                leadingIcon = if (hideUnknown) {
+                    {
+                        Icon(
+                            Icons.Rounded.Check,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                } else null,
+                colors = chipColors(app)
+            )
         }
 
         Spacer(Modifier.height(6.dp))
 
         // ---- Device list ----
-        if (filtered.isEmpty()) {
+        if (connected.isEmpty() && nearby.isEmpty()) {
             EmptyState(
                 icon = Icons.Rounded.BluetoothDisabled,
                 title = if (scan.scanning) "Looking around…" else "Nothing nearby",
                 subtitle = if (scan.scanning)
-                    "Keep the lost object close enough to be seen — devices appear as their signal is received."
+                    if (hideUnknown)
+                        "Unnamed devices are hidden — tap \"Named only\" to see everything in range. Names fill in during the discovery pass."
+                    else
+                        "Keep the lost object close enough to be seen — devices appear as their signal is received."
                 else "Start scanning to discover nearby Bluetooth devices."
             )
         } else {
@@ -251,7 +279,33 @@ fun DeviceScanScreen(
                 ),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                items(filtered, key = { it.address }) { d ->
+                if (connected.isNotEmpty()) {
+                    item(key = "connected-header") {
+                        Column {
+                            Spacer(Modifier.height(4.dp))
+                            SectionLabel("Connected to this phone")
+                            Spacer(Modifier.height(8.dp))
+                        }
+                    }
+                    items(connected, key = { "c-${it.address}" }) { c ->
+                        ConnectedRow(
+                            device = c,
+                            live = scan.devices.firstOrNull { it.address == c.address },
+                            onClick = {
+                                Haptics.tick(context, 160)
+                                onSelect(c.address, c.name)
+                            }
+                        )
+                    }
+                    item(key = "nearby-header") {
+                        Column {
+                            Spacer(Modifier.height(8.dp))
+                            SectionLabel("Nearby devices")
+                            Spacer(Modifier.height(8.dp))
+                        }
+                    }
+                }
+                items(nearby, key = { it.address }) { d ->
                     DeviceRow(
                         device = d,
                         onClick = {
@@ -370,6 +424,61 @@ private fun Banner(icon: ImageVector, text: String) {
             Icon(icon, null, tint = app.danger, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(10.dp))
             Text(text, style = MaterialTheme.typography.bodySmall, color = app.danger)
+        }
+    }
+}
+
+@Composable
+private fun ConnectedRow(
+    device: ConnectedDevicesProvider.ConnectedDevice,
+    live: DeviceUi?,
+    onClick: () -> Unit
+) {
+    val app = LocalAppColors.current
+    val category = DeviceCategories.categorize(device.name, null, emptyList(), device.classMajor)
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = app.neon.copy(alpha = 0.07f),
+        border = androidx.compose.foundation.BorderStroke(1.dp, app.neon.copy(alpha = 0.45f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .background(app.neon.copy(alpha = 0.14f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(categoryIcon(category), null, tint = app.neon, modifier = Modifier.size(22.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    device.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    live?.let { "Connected · ${Format.rssi(it.rssiRaw)}" }
+                        ?: "Connected · not advertising right now",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = app.neon
+                )
+            }
+            if (live != null) {
+                Sparkline(
+                    history = live.history,
+                    color = app.neon,
+                    modifier = Modifier.size(width = 56.dp, height = 22.dp)
+                )
+            }
         }
     }
 }

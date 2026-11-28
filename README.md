@@ -34,10 +34,14 @@ FindBeam helps you answer two everyday questions:
 ## Features
 
 ### 🎯 Object Finder
+- **"Connected to this phone"** section — your watch, earbuds and other bonded
+  devices with their real names (GATT + A2DP/headset profiles), trackable even
+  though bonded devices advertise with rotating private addresses
 - Live BLE scanning with signal-strength meters, history sparklines and
   device-type detection — names come from classic Bluetooth discovery rounds
   (the same mechanism the system settings uses), the Android device cache and
   a GATT Device-Name read, so real names appear even when ads omit them
+- "Named only" toggle to hide unnamed advertiser beacons
 - **Direction scan** — hold the phone flat, turn a full circle; FindBeam keeps
   the entire spin in an anchor estimator (no time window) and finds the
   strongest direction with weighted circular statistics on the strongest

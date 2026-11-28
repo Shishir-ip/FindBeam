@@ -205,6 +205,25 @@ private fun DirectionScanPhase(track: TrackState, viewModel: FinderViewModel) {
             color = app.textDim
         )
 
+        if (track.noSignalsYet) {
+            Spacer(Modifier.height(16.dp))
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = app.amber.copy(alpha = 0.12f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, app.amber.copy(alpha = 0.4f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    "No signal received yet — \"${track.deviceName.ifBlank { "this device" }}\" may not be " +
+                        "advertising while connected to your phone. Disconnect it (or toggle its Bluetooth) " +
+                        "so it starts advertising again.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = app.amber,
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
+        }
+
         Spacer(Modifier.height(28.dp))
 
         // Coverage ring

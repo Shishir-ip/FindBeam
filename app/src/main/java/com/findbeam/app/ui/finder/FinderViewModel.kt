@@ -11,6 +11,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.findbeam.app.core.audio.BeepPlayer
 import com.findbeam.app.core.ble.BleScanner
+import com.findbeam.app.core.ble.ConnectedDevicesProvider
 import com.findbeam.app.core.ble.DeviceCategories
 import com.findbeam.app.core.ble.DeviceCategory
 import com.findbeam.app.core.haptics.Haptics
@@ -76,6 +77,7 @@ data class TrackState(
     val pitchDeg: Float = 0f,
     val needsCalibration: Boolean = false,
     val signalLost: Boolean = false,
+    val noSignalsYet: Boolean = false,
     val trackingMs: Long = 0
 )
 
@@ -83,6 +85,7 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
 
     private val ctx = app
     private val scanner = BleScanner(app)
+    private val connectedProvider = ConnectedDevicesProvider(app)
     private val compass = CompassEngine(app)
     private val stepCounter = StepCounter(app)
     private val proximity = ProximityTracker()
@@ -124,8 +127,14 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
     private val visitedBins = BooleanArray(12)
     private var autoAdvanceJob: Job? = null
     private var trackLoop: Job? = null
-    private var discoveryJob: Job? = null
     private var lastScanPublish = 0L
+    private var connectedPollJob: Job? = null
+    private var discoveryGeneration = 0
+
+    private val _connectedDevices =
+        MutableStateFlow<List<ConnectedDevicesProvider.ConnectedDevice>>(emptyList())
+    val connectedDevices: StateFlow<List<ConnectedDevicesProvider.ConnectedDevice>> =
+        _connectedDevices
 
     private val _scanUi = MutableStateFlow(ScanUiState())
     val scanUi: StateFlow<ScanUiState> = _scanUi
@@ -160,36 +169,79 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
         scanner.lowLatency = false
         val ok = scanner.start(::onBleResult)
         _scanUi.value = _scanUi.value.copy(scanning = ok)
-        if (ok) startDiscoveryLoop()
+        if (ok) {
+            startDiscoveryLoop()
+            startConnectedPoll()
+        }
     }
 
     fun stopScan() {
         stopDiscoveryLoop()
+        stopConnectedPoll()
         scanner.stop()
         _scanUi.value = _scanUi.value.copy(scanning = false)
     }
 
     /**
-     * Runs classic discovery in rounds while the scan screen is open. This
-     * is the same mechanism the system Bluetooth settings uses to show
-     * names for nearby (unbonded) devices: the stack fetches remote names
-     * during discovery and caches them.
+     * Runs classic discovery in BACK-TO-BACK rounds while the scan screen is
+     * open, throttling the LE scan to LOW_POWER during each round. This is
+     * the same mechanism the system Bluetooth settings uses to show names
+     * for nearby (unbonded) devices — and running both scans at full duty
+     * cycle starves discovery on many OEM stacks.
      */
     private fun startDiscoveryLoop() {
-        if (discoveryJob?.isActive == true) return
-        discoveryJob = viewModelScope.launch {
-            while (_scanUi.value.scanning) {
-                val started = scanner.startClassicDiscovery(::onRemoteInfoResolved)
-                if (!started) break
-                delay(30_000) // a discovery pass runs ~12–25 s
+        val gen = ++discoveryGeneration
+        scheduleDiscoveryRound(gen, initialDelayMs = 0)
+    }
+
+    private fun scheduleDiscoveryRound(gen: Int, initialDelayMs: Long) {
+        viewModelScope.launch {
+            delay(initialDelayMs)
+            if (!_scanUi.value.scanning || gen != discoveryGeneration) return@launch
+
+            scanner.throttleForDiscovery = true
+            scanner.restart()
+
+            val started = scanner.startClassicDiscovery(
+                onResolved = ::onRemoteInfoResolved,
+                onFinished = {
+                    if (gen == discoveryGeneration && _scanUi.value.scanning) {
+                        scanner.throttleForDiscovery = false
+                        scanner.restart()
+                        scheduleDiscoveryRound(gen, 1_500)
+                    }
+                }
+            )
+            if (!started) {
+                scanner.throttleForDiscovery = false
+                scanner.restart()
+                scheduleDiscoveryRound(gen, 12_000)
             }
         }
     }
 
     private fun stopDiscoveryLoop() {
-        discoveryJob?.cancel()
-        discoveryJob = null
+        discoveryGeneration++
+        scanner.throttleForDiscovery = false
         scanner.stopDiscovery()
+    }
+
+    /** Polls currently-connected devices (GATT + A2DP/headset profiles). */
+    private fun startConnectedPoll() {
+        stopConnectedPoll()
+        connectedProvider.ensureProxies()
+        _connectedDevices.value = connectedProvider.snapshot()
+        connectedPollJob = viewModelScope.launch {
+            while (_scanUi.value.scanning) {
+                delay(4_000)
+                _connectedDevices.value = connectedProvider.snapshot()
+            }
+        }
+    }
+
+    private fun stopConnectedPoll() {
+        connectedPollJob?.cancel()
+        connectedPollJob = null
     }
 
     private fun onRemoteInfoResolved(address: String, info: BleScanner.RemoteInfo) {
@@ -349,7 +401,13 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
         lastTrackingSampleAt = 0L
 
         scanner.lowLatency = true
-        scanner.start(::onBleResult, filterAddress = address)
+        // Bonded devices usually advertise with rotating private addresses,
+        // so filter by address AND by known name — either match counts.
+        scanner.start(
+            ::onBleResult,
+            filterAddress = address,
+            filterName = selectedName.takeIf { it.isNotBlank() && it != "Unknown device" }
+        )
 
         compass.start(object : CompassEngine.Callback {
             override fun onHeading(headingDeg: Float, pitchDeg: Float, accuracy: Int) {
@@ -493,6 +551,7 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
                     pitchDeg = currentPitch,
                     compassAccuracy = compassAccuracy,
                     needsCalibration = compassAccuracy < SensorManager.SENSOR_STATUS_ACCURACY_LOW,
+                    noSignalsYet = lastTrackingSampleAt == 0L && (now - trackingStartedAt) > 15_000,
                     trackingMs = now - trackingStartedAt
                 )
             }
