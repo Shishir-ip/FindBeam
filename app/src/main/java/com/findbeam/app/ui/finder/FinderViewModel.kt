@@ -230,13 +230,35 @@ class FinderViewModel(app: Application) : AndroidViewModel(app) {
     private fun startConnectedPoll() {
         stopConnectedPoll()
         connectedProvider.ensureProxies()
-        _connectedDevices.value = connectedProvider.snapshot()
+        val first = connectedProvider.snapshot()
+        _connectedDevices.value = first
+        applyConnectedNames(first)
         connectedPollJob = viewModelScope.launch {
             while (_scanUi.value.scanning) {
                 delay(4_000)
-                _connectedDevices.value = connectedProvider.snapshot()
+                val snapshot = connectedProvider.snapshot()
+                _connectedDevices.value = snapshot
+                applyConnectedNames(snapshot)
             }
         }
+    }
+
+    /** Bonded names are gold: push them into the scan list by address. */
+    private fun applyConnectedNames(connected: List<ConnectedDevicesProvider.ConnectedDevice>) {
+        var changed = false
+        for (c in connected) {
+            if (c.name == "Unnamed device") continue
+            devices[c.address]?.let { r ->
+                if (r.rawName == null) {
+                    r.rawName = c.name
+                    r.category = DeviceCategories.categorize(
+                        r.rawName, r.companyId, r.uuids, r.classMajor
+                    )
+                    changed = true
+                }
+            }
+        }
+        if (changed) publishScanUi(force = true)
     }
 
     private fun stopConnectedPoll() {

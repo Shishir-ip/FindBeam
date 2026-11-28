@@ -2,14 +2,19 @@ package com.findbeam.app.ui.finder
 
 import android.view.WindowManager
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -30,6 +35,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DirectionsWalk
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Close
@@ -53,6 +59,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -151,8 +158,19 @@ fun TrackingScreen(
         AnimatedContent(
             targetState = track.phase,
             transitionSpec = {
-                (fadeIn(tween(260)) + slideHorizontallyInside())
-                    .togetherWith(fadeOut(tween(180)))
+                if (targetState == TrackPhase.ARRIVED) {
+                    // Success screen: a calm scale + fade, not a slide.
+                    (
+                        scaleIn(
+                            initialScale = 0.88f,
+                            animationSpec = spring(dampingRatio = 0.82f, stiffness = 240f)
+                        ) + fadeIn(tween(240))
+                        )
+                        .togetherWith(fadeOut(tween(160)))
+                } else {
+                    (fadeIn(tween(260)))
+                        .togetherWith(fadeOut(tween(180)))
+                }
             },
             label = "phase",
             modifier = Modifier
@@ -167,12 +185,6 @@ fun TrackingScreen(
         }
     }
 }
-
-private fun AnimatedContentTransitionScope<TrackPhase>.slideHorizontallyInside() =
-    slideIntoContainer(
-        AnimatedContentTransitionScope.SlideDirection.Up,
-        tween(300)
-    )
 
 // ------------------------------------------------------------- phase 1
 
@@ -501,13 +513,6 @@ private fun GuidingPhase(track: TrackState, rotationDeg: Float, viewModel: Finde
 @Composable
 private fun ArrivedPhase(track: TrackState, viewModel: FinderViewModel, onDone: () -> Unit) {
     val app = LocalAppColors.current
-    val context = LocalContext.current
-
-    LaunchedEffect(Unit) {
-        if (Locator.settingsStore.settings.value.haptics) {
-            Haptics.arrive(context)
-        }
-    }
 
     Box(
         modifier = Modifier
@@ -518,17 +523,43 @@ private fun ArrivedPhase(track: TrackState, viewModel: FinderViewModel, onDone: 
         ConfettiOverlay(visible = true, modifier = Modifier.fillMaxSize())
 
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(28.dp)) {
+            // Soft breathing halo + a springy check mark. The arrival
+            // haptic already fired once from the view model.
+            val breath by rememberInfiniteTransition(label = "breath").animateFloat(
+                initialValue = 0.10f,
+                targetValue = 0.22f,
+                animationSpec = infiniteRepeatable(
+                    tween(1500, easing = LinearEasing),
+                    RepeatMode.Reverse
+                ),
+                label = "breathAlpha"
+            )
+            val checkScale = remember { Animatable(0.4f) }
+            LaunchedEffect(Unit) {
+                checkScale.animateTo(
+                    1f,
+                    spring(
+                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                        stiffness = 320f
+                    )
+                )
+            }
             Box(
                 modifier = Modifier
-                    .size(110.dp)
-                    .background(app.neon.copy(alpha = 0.14f), CircleShape),
+                    .size(120.dp)
+                    .background(app.neon.copy(alpha = breath), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
-                GlowArrow(
-                    angleDeg = 0f,
-                    aligned = true,
-                    arrived = true,
-                    modifier = Modifier.size(92.dp)
+                Icon(
+                    Icons.Rounded.Check,
+                    contentDescription = null,
+                    tint = app.neon,
+                    modifier = Modifier
+                        .size(64.dp)
+                        .graphicsLayer {
+                            scaleX = checkScale.value
+                            scaleY = checkScale.value
+                        }
                 )
             }
             Spacer(Modifier.height(26.dp))
